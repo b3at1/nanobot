@@ -2,13 +2,14 @@
 
 import json
 import os
+import re
 from typing import Any
 
 import litellm
 from litellm import acompletion
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
-from nanobot.providers.registry import find_by_model, find_gateway
+from nanobot.providers.registry import ProviderSpec, find_by_model, find_gateway
 
 
 class LiteLLMProvider(LLMProvider):
@@ -89,10 +90,14 @@ class LiteLLMProvider(LLMProvider):
         
         return model
     
+    def _get_effective_spec(self, model: str) -> ProviderSpec | None:
+        """Return the ProviderSpec for the current gateway or model."""
+        return self._gateway or find_by_model(model)
+
     def _apply_model_overrides(self, model: str, kwargs: dict[str, Any]) -> None:
         """Apply model-specific parameter overrides from the registry."""
         model_lower = model.lower()
-        spec = find_by_model(model)
+        spec = self._get_effective_spec(model)
         if spec:
             for pattern, overrides in spec.model_overrides:
                 if pattern in model_lower:
@@ -127,6 +132,7 @@ class LiteLLMProvider(LLMProvider):
             "messages": messages,
             "max_tokens": max_tokens,
             "temperature": temperature,
+            "stream": False,
         }
         
         # Apply model-specific overrides (e.g. kimi-k2.5 temperature)
@@ -149,6 +155,12 @@ class LiteLLMProvider(LLMProvider):
             kwargs["tool_choice"] = "auto"
         
         try:
+            spec = self._get_effective_spec(model)
+            if spec and spec.force_stream:
+                # Server always returns SSE — stream and reassemble.
+                kwargs["stream"] = True
+                return await self._stream_and_reassemble(**kwargs)
+
             response = await acompletion(**kwargs)
             return self._parse_response(response)
         except Exception as e:
@@ -158,6 +170,13 @@ class LiteLLMProvider(LLMProvider):
                 finish_reason="error",
             )
     
+    @staticmethod
+    def _strip_thinking(text: str | None) -> str | None:
+        """Remove <think>...</think> blocks from model output."""
+        if not text:
+            return text
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip() or None
+
     def _parse_response(self, response: Any) -> LLMResponse:
         """Parse LiteLLM response into our standard format."""
         choice = response.choices[0]
@@ -191,11 +210,83 @@ class LiteLLMProvider(LLMProvider):
         reasoning_content = getattr(message, "reasoning_content", None)
         
         return LLMResponse(
-            content=message.content,
+            content=self._strip_thinking(message.content),
             tool_calls=tool_calls,
             finish_reason=choice.finish_reason or "stop",
             usage=usage,
             reasoning_content=reasoning_content,
+        )
+
+    async def _stream_and_reassemble(self, **kwargs: Any) -> LLMResponse:
+        """Stream a completion and reassemble into a single LLMResponse.
+
+        Used for providers whose API always returns SSE regardless of the
+        stream parameter (e.g. TAMU AI's Open-WebUI proxy).
+        """
+        response = await acompletion(**kwargs)
+
+        content_parts: list[str] = []
+        tool_calls_raw: dict[int, dict[str, Any]] = {}  # index -> {id, name, args}
+        finish_reason = "stop"
+        usage: dict[str, int] = {}
+
+        async for chunk in response:
+            choice = chunk.choices[0]
+            delta = choice.delta
+
+            # Accumulate content tokens
+            if delta.content:
+                content_parts.append(delta.content)
+
+            # Accumulate streamed tool calls
+            if hasattr(delta, "tool_calls") and delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_raw:
+                        tool_calls_raw[idx] = {
+                            "id": getattr(tc, "id", "") or "",
+                            "name": getattr(tc.function, "name", "") or "",
+                            "arguments": "",
+                        }
+                    entry = tool_calls_raw[idx]
+                    if tc.id:
+                        entry["id"] = tc.id
+                    if hasattr(tc, "function"):
+                        if tc.function.name:
+                            entry["name"] = tc.function.name
+                        if tc.function.arguments:
+                            entry["arguments"] += tc.function.arguments
+
+            if choice.finish_reason:
+                finish_reason = choice.finish_reason
+
+            # Capture usage from the final chunk if present
+            if hasattr(chunk, "usage") and chunk.usage:
+                usage = {
+                    "prompt_tokens": chunk.usage.prompt_tokens or 0,
+                    "completion_tokens": chunk.usage.completion_tokens or 0,
+                    "total_tokens": chunk.usage.total_tokens or 0,
+                }
+
+        # Build tool call requests
+        tool_calls: list[ToolCallRequest] = []
+        for idx in sorted(tool_calls_raw):
+            raw = tool_calls_raw[idx]
+            try:
+                args = json.loads(raw["arguments"]) if raw["arguments"] else {}
+            except json.JSONDecodeError:
+                args = {"raw": raw["arguments"]}
+            tool_calls.append(ToolCallRequest(
+                id=raw["id"],
+                name=raw["name"],
+                arguments=args,
+            ))
+
+        return LLMResponse(
+            content=self._strip_thinking("".join(content_parts) or None),
+            tool_calls=tool_calls,
+            finish_reason=finish_reason,
+            usage=usage,
         )
     
     def get_default_model(self) -> str:
