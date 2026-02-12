@@ -47,7 +47,6 @@ class ProviderSpec:
 
     # gateway behavior
     strip_model_prefix: bool = False         # strip "provider/" before re-prefixing
-    force_stream: bool = False               # always use stream=True (server always returns SSE)
 
     # per-model param overrides, e.g. (("kimi-k2.5", {"temperature": 1.0}),)
     model_overrides: tuple[tuple[str, dict[str, Any]], ...] = ()
@@ -67,26 +66,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
     # Gateways can route any model, so they win in fallback.
 
     # OpenRouter: global gateway, keys start with "sk-or-"
-    ProviderSpec(
-    name="tamuai",                   # config field name
-    keywords=("tamuai",),            # model-name keywords for auto-matching
-    env_key="OPENAI_API_KEY",        # LiteLLM uses OPENAI_API_KEY for openai/ prefix
-    display_name="TAMU AI",          # shown in `nanobot status`
-    litellm_prefix="openai",         # LiteLLM recognizes openai/ for OpenAI-compat APIs
-    skip_prefixes=("openai/",),      # don't double-prefix
-    env_extras=(),
-    is_gateway=True,
-    is_local=False,
-    detect_by_key_prefix="sk-",
-    detect_by_base_keyword="tamuai",
-    default_api_base="https://chat-api.tamu.ai/api",
-    strip_model_prefix=True,         # strip "tamuai/" before re-prefixing with "openai/"
-    force_stream=True,               # TAMU proxy always returns SSE
-    model_overrides=(
-        ("kevin", {"temperature": 1}),  # Claude Opus 4.5 w/ thinking requires temperature=1
-    ),
-    ),
-    
     ProviderSpec(
         name="openrouter",
         keywords=("openrouter",),

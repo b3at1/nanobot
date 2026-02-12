@@ -178,7 +178,6 @@ class ProviderConfig(BaseModel):
 
 class ProvidersConfig(BaseModel):
     """Configuration for LLM providers."""
-    tamuai: ProviderConfig = Field(default_factory=ProviderConfig)
     anthropic: ProviderConfig = Field(default_factory=ProviderConfig)
     openai: ProviderConfig = Field(default_factory=ProviderConfig)
     openrouter: ProviderConfig = Field(default_factory=ProviderConfig)
