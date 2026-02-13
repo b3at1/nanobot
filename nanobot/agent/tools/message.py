@@ -52,6 +52,11 @@ class MessageTool(Tool):
                 "chat_id": {
                     "type": "string",
                     "description": "Optional: target chat/user ID"
+                },
+                "attachments": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Optional: list of local file paths to upload as attachments"
                 }
             },
             "required": ["content"]
@@ -62,6 +67,7 @@ class MessageTool(Tool):
         content: str, 
         channel: str | None = None, 
         chat_id: str | None = None,
+        attachments: list[str] | None = None,
         **kwargs: Any
     ) -> str:
         channel = channel or self._default_channel
@@ -76,7 +82,8 @@ class MessageTool(Tool):
         msg = OutboundMessage(
             channel=channel,
             chat_id=chat_id,
-            content=content
+            content=content,
+            media=attachments or [],
         )
         
         try:

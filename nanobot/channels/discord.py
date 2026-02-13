@@ -73,24 +73,51 @@ class DiscordChannel(BaseChannel):
             self._http = None
 
     async def send(self, msg: OutboundMessage) -> None:
-        """Send a message through Discord REST API."""
+        """Send a message through Discord REST API, with optional file attachments."""
         if not self._http:
             logger.warning("Discord HTTP client not initialized")
             return
 
         url = f"{DISCORD_API_BASE}/channels/{msg.chat_id}/messages"
-        payload: dict[str, Any] = {"content": msg.content}
+        headers = {"Authorization": f"Bot {self.config.token}"}
 
+        # Build the JSON payload
+        payload: dict[str, Any] = {"content": msg.content}
         if msg.reply_to:
             payload["message_reference"] = {"message_id": msg.reply_to}
             payload["allowed_mentions"] = {"replied_user": False}
 
-        headers = {"Authorization": f"Bot {self.config.token}"}
+        # Collect valid file paths from msg.media
+        files_to_upload: list[Path] = []
+        if msg.media:
+            for path_str in msg.media:
+                p = Path(path_str)
+                if p.is_file():
+                    files_to_upload.append(p)
+                else:
+                    logger.warning(f"Discord attachment not found: {path_str}")
 
         try:
             for attempt in range(3):
                 try:
-                    response = await self._http.post(url, headers=headers, json=payload)
+                    if files_to_upload:
+                        # Multipart upload: files + JSON payload_json
+                        upload_files = {}
+                        for i, fp in enumerate(files_to_upload):
+                            upload_files[f"files[{i}]"] = (
+                                fp.name,
+                                fp.read_bytes(),
+                                "application/octet-stream",
+                            )
+                        response = await self._http.post(
+                            url,
+                            headers=headers,
+                            data={"payload_json": json.dumps(payload)},
+                            files=upload_files,
+                        )
+                    else:
+                        response = await self._http.post(url, headers=headers, json=payload)
+
                     if response.status_code == 429:
                         data = response.json()
                         retry_after = float(data.get("retry_after", 1.0))
